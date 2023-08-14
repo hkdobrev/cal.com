@@ -3,6 +3,7 @@ import { expect } from "@playwright/test";
 import type { IncomingMessage, ServerResponse } from "http";
 import { createServer } from "http";
 import { noop } from "lodash";
+import type { API, Messages } from "mailhog";
 
 import { test } from "./fixtures";
 
@@ -182,4 +183,39 @@ export async function gotoRoutingLink({
 
   // HACK: There seems to be some issue with the inputs to the form getting reset if we don't wait.
   await new Promise((resolve) => setTimeout(resolve, 1000));
+}
+
+export async function getEmailsReceivedByUser({
+  emails,
+  userEmail,
+}: {
+  emails: API;
+  userEmail: string;
+}): Promise<Messages | null> {
+  return emails.search(userEmail, "to");
+}
+
+export async function expectEmailsToHaveSubject({
+  emails,
+  organizer,
+  booker,
+  eventTitle,
+}: {
+  emails: API;
+  organizer: { name?: string | null; email: string };
+  booker: { name: string; email: string };
+  eventTitle: string;
+}) {
+  const emailsOrganizerReceived = await getEmailsReceivedByUser({ emails, userEmail: organizer.email });
+  const emailsBookerReceived = await getEmailsReceivedByUser({ emails, userEmail: booker.email });
+
+  expect(emailsOrganizerReceived?.total).toBe(1);
+  expect(emailsBookerReceived?.total).toBe(1);
+
+  const [organizerFirstEmail] = (emailsOrganizerReceived as Messages).items;
+  const [bookerFirstEmail] = (emailsBookerReceived as Messages).items;
+  const emailSubject = `${eventTitle} between ${organizer.name} and ${booker.name}`;
+
+  expect(organizerFirstEmail.subject).toBe(emailSubject);
+  expect(bookerFirstEmail.subject).toBe(emailSubject);
 }
