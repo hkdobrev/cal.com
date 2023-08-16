@@ -4,7 +4,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useSession } from "next-auth/react";
 import type { TFunction } from "next-i18next";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FieldError } from "react-hook-form";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
@@ -46,33 +46,23 @@ export const BookEventForm = ({ onCancel }: BookEventFormProps) => {
   const searchParams = useSearchParams();
   const routerQuery = useRouterQuery();
   const session = useSession();
-  const bookingSuccessRedirect = useBookingSuccessRedirect();
   const reserveSlotMutation = trpc.viewer.public.slots.reserveSlot.useMutation({
     trpc: { context: { skipBatch: true } },
   });
   const removeSelectedSlot = trpc.viewer.public.slots.removeSelectedSlotMark.useMutation({
     trpc: { context: { skipBatch: true } },
   });
-  const router = useRouter();
-  const { t, i18n } = useLocale();
-  const { timezone } = useTimePreferences();
-  const errorRef = useRef<HTMLDivElement>(null);
+
   const rescheduleUid = useBookerStore((state) => state.rescheduleUid);
   const bookingData = useBookerStore((state) => state.bookingData);
-  const eventSlug = useBookerStore((state) => state.eventSlug);
   const duration = useBookerStore((state) => state.selectedDuration);
   const timeslot = useBookerStore((state) => state.selectedTimeslot);
-  const recurringEventCount = useBookerStore((state) => state.recurringEventCount);
-  const username = useBookerStore((state) => state.username);
   const formValues = useBookerStore((state) => state.formValues);
-  const setFormValues = useBookerStore((state) => state.setFormValues);
-  const seatedEventData = useBookerStore((state) => state.seatedEventData);
-  const verifiedEmail = useBookerStore((state) => state.verifiedEmail);
-  const setVerifiedEmail = useBookerStore((state) => state.setVerifiedEmail);
+
   const isRescheduling = !!rescheduleUid && !!bookingData;
   const event = useEvent();
   const eventType = event.data;
-
+  const [defaultValues, setDefaultValues] = useState<Record<string, unknown>>(null);
   const reserveSlot = () => {
     if (eventType?.id && timeslot && (duration || eventType?.length)) {
       reserveSlotMutation.mutate({
@@ -102,36 +92,65 @@ export const BookEventForm = ({ onCancel }: BookEventFormProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eventType?.id, timeslot]);
 
-  const defaultValues = useMemo(() => {
-    if (Object.keys(formValues).length) return formValues;
+  useEffect(() => {
+    (async function () {
+      if (Object.keys(formValues).length) return formValues;
 
-    if (!eventType?.bookingFields) {
-      return {};
-    }
-    const querySchema = getBookingResponsesPartialSchema({
-      eventType: {
-        bookingFields: eventType.bookingFields,
-      },
-      view: rescheduleUid ? "reschedule" : "booking",
-    });
+      if (!eventType?.bookingFields) {
+        return {};
+      }
+      const querySchema = getBookingResponsesPartialSchema({
+        eventType: {
+          bookingFields: eventType.bookingFields,
+        },
+        view: rescheduleUid ? "reschedule" : "booking",
+      });
 
-    const parsedQuery = querySchema.parse({
-      ...routerQuery,
-      // `guest` because we need to support legacy URL with `guest` query param support
-      // `guests` because the `name` of the corresponding bookingField is `guests`
-      guests: searchParams?.getAll("guests") || searchParams?.getAll("guest"),
-    });
+      const parsedQuery = await querySchema.parseAsync({
+        ...routerQuery,
+        // `guest` because we need to support legacy URL with `guest` query param support
+        // `guests` because the `name` of the corresponding bookingField is `guests`
+        guests: searchParams?.getAll("guests") || searchParams?.getAll("guest"),
+      });
 
-    const defaultUserValues = {
-      email: rescheduleUid
-        ? bookingData?.attendees[0].email
-        : parsedQuery["email"] || session.data?.user?.email || "",
-      name: rescheduleUid
-        ? bookingData?.attendees[0].name
-        : parsedQuery["name"] || session.data?.user?.name || "",
-    };
+      const defaultUserValues = {
+        email: rescheduleUid
+          ? bookingData?.attendees[0].email
+          : parsedQuery["email"] || session.data?.user?.email || "",
+        name: rescheduleUid
+          ? bookingData?.attendees[0].name
+          : parsedQuery["name"] || session.data?.user?.name || "",
+      };
 
-    if (!isRescheduling) {
+      if (!isRescheduling) {
+        const defaults = {
+          responses: {} as Partial<z.infer<typeof bookingFormSchema>["responses"]>,
+        };
+
+        const responses = eventType.bookingFields.reduce((responses, field) => {
+          return {
+            ...responses,
+            [field.name]: parsedQuery[field.name] || undefined,
+          };
+        }, {});
+
+        defaults.responses = {
+          ...responses,
+          name: defaultUserValues.name,
+          email: defaultUserValues.email,
+        };
+
+        setDefaultValues(defaults);
+      }
+
+      if ((!rescheduleUid && !bookingData) || !bookingData?.attendees.length) {
+        return {};
+      }
+      const primaryAttendee = bookingData.attendees[0];
+      if (!primaryAttendee) {
+        return {};
+      }
+
       const defaults = {
         responses: {} as Partial<z.infer<typeof bookingFormSchema>["responses"]>,
       };
@@ -139,43 +158,16 @@ export const BookEventForm = ({ onCancel }: BookEventFormProps) => {
       const responses = eventType.bookingFields.reduce((responses, field) => {
         return {
           ...responses,
-          [field.name]: parsedQuery[field.name] || undefined,
+          [field.name]: bookingData.responses[field.name],
         };
       }, {});
-
       defaults.responses = {
         ...responses,
         name: defaultUserValues.name,
         email: defaultUserValues.email,
       };
-
-      return defaults;
-    }
-
-    if ((!rescheduleUid && !bookingData) || !bookingData.attendees.length) {
-      return {};
-    }
-    const primaryAttendee = bookingData.attendees[0];
-    if (!primaryAttendee) {
-      return {};
-    }
-
-    const defaults = {
-      responses: {} as Partial<z.infer<typeof bookingFormSchema>["responses"]>,
-    };
-
-    const responses = eventType.bookingFields.reduce((responses, field) => {
-      return {
-        ...responses,
-        [field.name]: bookingData.responses[field.name],
-      };
-    }, {});
-    defaults.responses = {
-      ...responses,
-      name: defaultUserValues.name,
-      email: defaultUserValues.email,
-    };
-    return defaults;
+      setDefaultValues(defaults);
+    })();
   }, [eventType?.bookingFields, formValues, isRescheduling, bookingData, rescheduleUid]);
 
   const bookingFormSchema = z
@@ -190,6 +182,48 @@ export const BookEventForm = ({ onCancel }: BookEventFormProps) => {
     })
     .passthrough();
 
+  if (!defaultValues) {
+    return null;
+  }
+  return (
+    <BookEventFormChild
+      onCancel={onCancel}
+      bookingFormSchema={bookingFormSchema}
+      defaultValues={defaultValues}
+      eventType={eventType}
+      isRescheduling={isRescheduling}
+      event={event}
+    />
+  );
+};
+
+export const BookEventFormChild = ({
+  onCancel,
+  defaultValues,
+  bookingFormSchema,
+  eventType,
+  isRescheduling,
+  event,
+}: BookEventFormProps) => {
+  const searchParams = useSearchParams();
+  const routerQuery = useRouterQuery();
+  const setFormValues = useBookerStore((state) => state.setFormValues);
+  const seatedEventData = useBookerStore((state) => state.seatedEventData);
+  const verifiedEmail = useBookerStore((state) => state.verifiedEmail);
+  const setVerifiedEmail = useBookerStore((state) => state.setVerifiedEmail);
+  const bookingSuccessRedirect = useBookingSuccessRedirect();
+
+  const router = useRouter();
+  const { t, i18n } = useLocale();
+  const { timezone } = useTimePreferences();
+  const errorRef = useRef<HTMLDivElement>(null);
+  const rescheduleUid = useBookerStore((state) => state.rescheduleUid);
+  const bookingData = useBookerStore((state) => state.bookingData);
+  const eventSlug = useBookerStore((state) => state.eventSlug);
+  const duration = useBookerStore((state) => state.selectedDuration);
+  const timeslot = useBookerStore((state) => state.selectedTimeslot);
+  const recurringEventCount = useBookerStore((state) => state.recurringEventCount);
+  const username = useBookerStore((state) => state.username);
   type BookingFormValues = {
     locationType?: EventLocationType["type"];
     responses: z.infer<typeof bookingFormSchema>["responses"];
@@ -199,10 +233,15 @@ export const BookEventForm = ({ onCancel }: BookEventFormProps) => {
   };
 
   const bookingForm = useForm<BookingFormValues>({
-    defaultValues,
-    resolver: zodResolver(bookingFormSchema), // Since this isn't set to strict we only validate the fields in the schema
+    defaultValues: {},
+    resolver: zodResolver(
+      bookingFormSchema,
+      {},
+      {
+        mode: "async",
+      }
+    ), // Since this isn't set to strict we only validate the fields in the schema
   });
-
   const createBookingMutation = useMutation(createBooking, {
     onSuccess: (responseData) => {
       const { uid, paymentUid } = responseData;
